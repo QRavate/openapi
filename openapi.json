@@ -1,0 +1,3198 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "API QRavate",
+    "version": "1.0.0",
+    "summary": "QR codes dynamiques, règles de redirection, changements programmés, statistiques et webhooks.",
+    "description": "L’API REST de QRavate crée des QR codes dynamiques, change leur destination après impression, programme des changements et lit les statistiques de scans. Elle reçoit et renvoie du JSON, utilise les codes HTTP habituels et s’authentifie par clé secrète.\n\nElle est incluse à partir du plan Pro. Les mêmes règles que l’application s’appliquent : limites du plan, contrôle anti-abus des destinations, isolation entre espaces de travail.\n\n## Démarrage rapide\n\n1. Dans votre espace, ouvrez [API et webhooks](/app/api) et créez une clé. Elle commence par `sk_` et ne s’affiche qu’une fois : rangez-la dans un gestionnaire de secrets.\n2. Vérifiez la clé avec `GET /me`, qui renvoie l’espace et le plan liés.\n3. Créez votre premier QR code :\n\n```bash\ncurl -X POST https://www.qravate.com/api/v1/qr \\\n  -H \"Authorization: Bearer sk_…\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"name\":\"Affiche vitrine\",\"destination\":\"https://exemple.fr/offre\"}'\n```\n\nLa réponse contient `short_url`, l’adresse encodée dans le QR code, et `id`, à réutiliser dans les autres appels. Téléchargez l’image avec `GET /qr/{id}/image.svg`, imprimez-la, puis changez la destination quand vous voulez avec `PATCH /qr/{id}` : le code imprimé ne change pas.\n\n## Authentification\n\nChaque requête porte la clé dans l’en-tête `Authorization` :\n\n```http\nAuthorization: Bearer sk_…\n```\n\nL’en-tête `X-API-Key: sk_…` est aussi accepté, pour les outils qui ne savent pas envoyer de jeton « Bearer ». Une clé donne accès à un seul espace de travail, en lecture et en écriture. Elle se révoque à tout moment depuis [API et webhooks](/app/api) ; une clé révoquée répond `401` immédiatement.\n\nN’appelez jamais l’API depuis un navigateur ou une application mobile avec votre clé : elle serait lisible par tous. Passez par votre serveur.\n\n## Limites de débit\n\n120 requêtes par minute et par clé, et 300 créations de QR codes par heure et par espace. Au-delà, l’API répond `429` avec le code `rate_limited` : attendez quelques secondes avant de réessayer, en espaçant les tentatives (attente exponentielle).\n\nLes limites du plan s’appliquent aussi : nombre de QR codes dynamiques, de règles par QR code, de changements programmés et durée d’historique des statistiques. Une limite atteinte répond `403` avec le code `plan_limit`.\n\n## Pagination\n\n`GET /qr` renvoie au plus `limit` éléments (50 par défaut, 200 au plus), du plus récent au plus ancien, et `next_cursor`. Pour la page suivante, repassez cette valeur dans `cursor`. `next_cursor` vaut `null` sur la dernière page.\n\n```bash\ncurl \"https://www.qravate.com/api/v1/qr?limit=100&cursor=2026-10-02T09:14:00.000Z\" -H \"Authorization: Bearer sk_…\"\n```\n\n## Erreurs\n\nUne erreur répond avec un statut HTTP 4xx et un corps de la même forme :\n\n```json\n{ \"error\": { \"code\": \"plan_limit\", \"message\": \"Limite de votre plan atteinte (500 QR codes dynamiques).\" } }\n```\n\n`message` est rédigé en français pour être montré tel quel ; `code` est stable et sert à vos traitements.\n\n| Statut | Code | Signification |\n|---|---|---|\n| 400 | `invalid_request` | Paramètre manquant ou invalide, JSON mal formé. |\n| 401 | `unauthorized` | Clé absente, invalide ou révoquée. |\n| 403 | `plan_required` | Le plan de l’espace n’inclut pas l’API. |\n| 403 | `plan_limit` | Limite du plan atteinte (QR codes, règles, changements programmés). |\n| 403 | `read_only` | Abonnement terminé : l’espace est en lecture seule. |\n| 403 | `blocked` | QR code bloqué par l’équipe anti-abus. |\n| 404 | `not_found` | QR code, changement programmé ou ressource introuvable dans cet espace. |\n| 409 | `deleted` | QR code supprimé : restaurez-le depuis l’application. |\n| 422 | `destination_blocked` | Destination présente sur une liste de sites dangereux. |\n| 429 | `rate_limited` | Plus de 120 requêtes par minute. |\n\n## QR codes et états\n\nUn QR code a un `id` (identifiant d’API) et un `code` (la partie courte de `short_url`). Il redirige vers une URL (`type: url`) ou affiche une page hébergée (`type: page` : menu, PDF, carte de contact ou liste de liens).\n\n| État | Au scan |\n|---|---|\n| `active` | Redirige vers la destination, ou applique les règles. |\n| `paused` | Affiche une page « QR code temporairement indisponible », sans rediriger. |\n| `deleted` | Supprimé, restaurable 30 jours depuis l’application, puis effacé. |\n| `blocked` | Bloqué par l’équipe anti-abus ; seul le support peut le débloquer. |\n\nUn changement de destination, d’état ou de règles s’applique partout en une minute environ.\n\n## Règles de redirection\n\n`rules` est une liste ordonnée : la première règle active dont toutes les conditions sont remplies l’emporte, sinon la destination principale s’applique. Une liste vide retire les règles.\n\n```json\n{\n  \"rules\": [\n    { \"name\": \"App Store\", \"when\": { \"os\": [\"ios\"] }, \"to\": [{ \"url\": \"https://apps.apple.com/…\" }] },\n    { \"name\": \"Menu anglais\", \"when\": { \"lang\": [\"en\"], \"time\": { \"from\": \"11:30\", \"to\": \"15:00\" } }, \"to\": [{ \"url\": \"https://exemple.fr/en\" }] },\n    { \"name\": \"Test A/B\", \"when\": {}, \"to\": [{ \"url\": \"https://exemple.fr/a\", \"weight\": 50 }, { \"url\": \"https://exemple.fr/b\", \"weight\": 50 }] }\n  ],\n  \"rules_clock\": \"paris\"\n}\n```\n\n| Condition | Valeurs |\n|---|---|\n| `device` | `mobile`, `tablet`, `desktop` |\n| `os` | `ios`, `android`, `windows`, `macos`, `linux`, `other` |\n| `app` | `instagram`, `facebook`, `messenger`, `linkedin`, `tiktok`, `snapchat`, `google`, `wechat`, `line`, `browser` |\n| `lang` | Codes de langue (`fr`, `en`…) |\n| `country` | Codes pays ISO 3166-1 (`FR`, `BE`…) |\n| `weekday` | 1 = lundi … 7 = dimanche |\n| `time` | `{ \"from\": \"HH:MM\", \"to\": \"HH:MM\" }` |\n| `date` | `{ \"from\": \"AAAA-MM-JJ\", \"to\": \"AAAA-MM-JJ\" }`, bornes incluses |\n\n`rules_clock` choisit l’heure des conditions `weekday`, `time` et `date` : `paris` (par défaut) ou `scanner`, le fuseau de la personne qui scanne. De 2 à 4 destinations avec `weight` (somme 100) font un test A/B, à partir du plan Pro. Chaque destination passe le contrôle anti-abus. Nombre de règles par QR code : 5 avec Essentiel, 10 avec Pro et Max.\n\n## Paramètres UTM\n\n`utm` vaut `true` pour ajouter `utm_source=qravate&utm_medium=qr` et le nom du QR code en `utm_campaign`, un objet `{ source, medium, campaign, content }` pour les personnaliser, `false` pour les retirer. Ils sont désactivés par défaut dans l’API, pour ne pas changer l’URL finale d’une intégration existante.\n\nUne destination qui contient déjà un paramètre `utm_*` n’est jamais modifiée. `served_destination` donne l’adresse réellement ouverte au scan.\n\n## Changements programmés\n\n`POST /qr/{id}/schedules` programme une nouvelle destination à une date donnée (ISO 8601 avec fuseau, par exemple `2026-06-21T08:00:00+02:00`). Le changement s’applique dans le quart d’heure qui suit, d’une minute à deux ans à l’avance, 5 changements en attente au plus par QR code. Un changement échoué passe à `failed`, avec la raison dans `error`.\n\n## Statistiques\n\n`GET /stats` et `GET /qr/{id}/stats` acceptent `from` et `to` (AAAA-MM-JJ, jours de Paris, 30 derniers jours par défaut). La période est ramenée à l’historique du plan : 365 jours avec Essentiel, 3 ans avec Pro et Max.\n\nLa réponse donne les scans et les visiteurs uniques jour par jour, leurs totaux, et la répartition par pays, ville, appareil, système, navigateur, langue et règle appliquée. Les visiteurs uniques sont estimés sans cookie ni identifiant stocké.\n\n## Webhooks\n\nLes webhooks préviennent votre serveur d’un événement, sans scruter l’API. Abonnez une URL en `https` depuis [API et webhooks](/app/api) ou avec `POST /webhooks`.\n\n| Événement | Envoyé quand |\n|---|---|\n| `qr.created` | Un QR code est créé (application, API, import ou assistant IA). |\n| `qr.destination_changed` | La destination ou la page hébergée change, y compris par un changement programmé. |\n| `qr.state_changed` | Un QR code est mis en pause, réactivé ou supprimé. |\n| `scans.threshold` | Un QR code atteint `scan_threshold` scans au total ; vérifié toutes les heures, une seule fois par QR code et par webhook. |\n\nAucun événement n’est envoyé à chaque scan. Chaque envoi est un `POST` JSON :\n\n```json\n{ \"event\": \"qr.destination_changed\", \"created_at\": \"2026-11-14T10:02:11.000Z\", \"data\": { \"id\": \"…\", \"code\": \"aB3x9Q\", \"destination\": \"https://exemple.fr/nouvelle-offre\" } }\n```\n\n### Vérifier la signature\n\nL’en-tête `X-Webhook-Signature: t=1763114531,v1=5d41…` signe chaque envoi. `v1` est le HMAC-SHA256 hexadécimal de `t + \".\" + corps brut`, avec le secret du webhook (renvoyé une seule fois à sa création). Refusez un envoi dont la signature ne correspond pas, ou dont `t` a plus de cinq minutes.\n\n```js\nimport { createHmac, timingSafeEqual } from 'node:crypto';\n\nexport function verify(rawBody, header, secret) {\n  const { t, v1 } = Object.fromEntries(header.split(',').map((p) => p.split('=')));\n  const expected = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex');\n  const fresh = Math.abs(Date.now() / 1000 - Number(t)) < 300;\n  return fresh && timingSafeEqual(Buffer.from(expected), Buffer.from(v1));\n}\n```\n\n### Réponses et nouvelles tentatives\n\nRépondez `2xx` en moins de 10 secondes. Après 20 échecs consécutifs, le webhook est désactivé : recréez-le une fois votre serveur réparé. Répondez `410` pour vous désabonner : c’est ce que font Zapier et Make quand un scénario est supprimé.\n\n## Assistants IA (MCP)\n\nLe serveur MCP, `https://www.qravate.com/mcp`, branche Claude, ChatGPT, Le Chat, Gemini CLI, Cursor ou tout client compatible. Le mode d’emploi pas à pas est sur la page [QR code et IA](/ai).\n\nIl crée des QR codes avec un design (style, couleurs, icône ou logo, texte d’appel), change une destination ou un design, programme un changement et lit les statistiques. La connexion passe par OAuth : aucune clé à copier, la personne peut créer son compte pendant la connexion, et l’accès en écriture se donne à part. Les fonctions liées à un plan (règles, comparaison, export, statistiques avancées) répondent avec le plan qui les inclut, et le nombre d’actions par jour dépend du plan (30 en Gratuit, 300 en Essentiel, 5 000 en Pro et Max). Les connexions se gèrent dans [Assistants IA](/app/connections).\n\nSans connecteur, un assistant peut aussi donner un lien qui ouvre le générateur déjà rempli : `https://www.qravate.com/generator#url=…&style=…&icon=…&cta=…` (voir [QR code et IA](/ai)).\n\nLes outils de création renvoient le QR code en SVG et une carte interactive (extension MCP Apps) : Claude et ChatGPT l’affichent dans la conversation, avec téléchargement PNG et SVG. Les icônes prédéfinies sont listées par l’outil `list_design_options`, et utilisables dans l’API avec `design.logo.icon`.\n\n## Zapier, n8n et Make\n\nLes connecteurs Zapier, n8n et Make utilisent cette API et la même clé : déclencheurs sur les événements des webhooks, actions pour créer un QR code, changer sa destination, le mettre en pause ou lire ses statistiques. Ils s’abonnent et se désabonnent seuls avec `POST /webhooks` et `DELETE /webhooks/{id}`.\n\n## Versions\n\nL’API est en version 1, dans le chemin `/api/v1`. Nous pouvons ajouter des champs aux réponses, des paramètres facultatifs et des événements de webhook sans changer de version : ignorez les champs que vous ne connaissez pas. Un changement incompatible passera par une version 2, annoncée à l’avance par e-mail aux propriétaires de clés.\n",
+    "contact": {
+      "name": "Support QRavate",
+      "email": "contact@qravate.com",
+      "url": "https://www.qravate.com/contact"
+    },
+    "termsOfService": "https://www.qravate.com/legal/terms"
+  },
+  "servers": [
+    {
+      "url": "https://www.qravate.com/api/v1",
+      "description": "Production"
+    }
+  ],
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Espace",
+      "description": "Vérifier une clé et lire l’espace de travail lié."
+    },
+    {
+      "name": "QR codes",
+      "description": "Créer, lire, modifier, mettre en pause et supprimer des QR codes dynamiques, et télécharger leur image."
+    },
+    {
+      "name": "Changements programmés",
+      "description": "Programmer une nouvelle destination à une date donnée, appliquée dans le quart d’heure."
+    },
+    {
+      "name": "Statistiques",
+      "description": "Scans par jour, pays, ville, appareil, système, navigateur, langue et règle."
+    },
+    {
+      "name": "Webhooks",
+      "description": "Abonner une URL aux événements `qr.created`, `qr.destination_changed`, `qr.state_changed`, `scans.threshold`. Format et signature : voir « Webhooks » dans l’introduction."
+    }
+  ],
+  "x-tagGroups": [
+    {
+      "name": "API v1",
+      "tags": [
+        "Espace",
+        "QR codes",
+        "Changements programmés",
+        "Statistiques",
+        "Webhooks"
+      ]
+    }
+  ],
+  "paths": {
+    "/me": {
+      "get": {
+        "operationId": "getWorkspace",
+        "tags": [
+          "Espace"
+        ],
+        "summary": "Espace lié à la clé",
+        "description": "Vérifie la clé et renvoie l’espace et le plan. Sert de test de connexion aux connecteurs.",
+        "responses": {
+          "200": {
+            "description": "Espace lié à la clé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                },
+                "example": {
+                  "workspace": {
+                    "id": "w_3k9d2a",
+                    "name": "Boulangerie Martin",
+                    "plan": "Pro"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/qr": {
+      "get": {
+        "operationId": "listQrCodes",
+        "tags": [
+          "QR codes"
+        ],
+        "summary": "Lister les QR codes",
+        "description": "Du plus récent au plus ancien, hors QR codes supprimés. Pagination par curseur : voir « Pagination ».",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Recherche dans le nom et la destination.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Filtre sur l’état.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "paused",
+                "blocked"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Nombre d’éléments par page.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` de la page précédente.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Une page de QR codes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/QrCode"
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "id": "q_8f2k1d0c",
+                      "code": "aB3x9Q",
+                      "name": "Affiche vitrine",
+                      "type": "url",
+                      "destination": "https://exemple.fr/offre",
+                      "page": null,
+                      "state": "active",
+                      "short_url": "https://qravate.page/aB3x9Q",
+                      "folder_id": null,
+                      "rules": [],
+                      "rules_clock": "paris",
+                      "utm": null,
+                      "served_destination": "https://exemple.fr/offre",
+                      "gs1": null,
+                      "created_at": "2026-11-14T09:30:00.000Z",
+                      "updated_at": "2026-11-14T09:30:00.000Z"
+                    }
+                  ],
+                  "next_cursor": null
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createQrCode",
+        "tags": [
+          "QR codes"
+        ],
+        "summary": "Créer un QR code",
+        "description": "Crée un QR code dynamique qui redirige vers `destination`, ou qui affiche une page hébergée (`page`). Émet `qr.created`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QrCreate"
+              },
+              "examples": {
+                "url": {
+                  "summary": "Vers une URL",
+                  "value": {
+                    "name": "Affiche vitrine",
+                    "destination": "https://exemple.fr/offre",
+                    "utm": true
+                  }
+                },
+                "regles": {
+                  "summary": "Avec des règles",
+                  "value": {
+                    "name": "Application",
+                    "destination": "https://exemple.fr/app",
+                    "rules": [
+                      {
+                        "name": "iPhone",
+                        "when": {
+                          "os": [
+                            "ios"
+                          ]
+                        },
+                        "to": [
+                          {
+                            "url": "https://apps.apple.com/app/id000"
+                          }
+                        ]
+                      },
+                      {
+                        "name": "Android",
+                        "when": {
+                          "os": [
+                            "android"
+                          ]
+                        },
+                        "to": [
+                          {
+                            "url": "https://play.google.com/store/apps/details?id=fr.exemple"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "page": {
+                  "summary": "Page de liens",
+                  "value": {
+                    "name": "Carte de visite",
+                    "page": {
+                      "kind": "links",
+                      "title": "Nous suivre",
+                      "links": [
+                        {
+                          "label": "Site",
+                          "url": "https://exemple.fr"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "gs1": {
+                  "summary": "Produit GS1 Digital Link",
+                  "value": {
+                    "name": "Confiture 250 g",
+                    "destination": "https://exemple.fr/confiture",
+                    "gs1": {
+                      "gtin": "3760123456784",
+                      "links": [
+                        {
+                          "type": "gs1:recallStatus",
+                          "url": "https://exemple.fr/rappel"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "design": {
+                  "summary": "Avec un design",
+                  "value": {
+                    "name": "Flyer",
+                    "destination": "https://exemple.fr",
+                    "design": {
+                      "fg": "#15162b",
+                      "moduleShape": "rounded",
+                      "eyeShape": "rounded",
+                      "logo": {
+                        "icon": "menu",
+                        "size": 0.2,
+                        "zone": "round"
+                      },
+                      "frame": {
+                        "style": "bottom",
+                        "text": "Voir le menu"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "QR code créé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/QrCode"
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "id": "q_8f2k1d0c",
+                    "code": "aB3x9Q",
+                    "name": "Affiche vitrine",
+                    "type": "url",
+                    "destination": "https://exemple.fr/offre",
+                    "page": null,
+                    "state": "active",
+                    "short_url": "https://qravate.page/aB3x9Q",
+                    "folder_id": null,
+                    "rules": [],
+                    "rules_clock": "paris",
+                    "utm": null,
+                    "served_destination": "https://exemple.fr/offre",
+                    "gs1": null,
+                    "created_at": "2026-11-14T09:30:00.000Z",
+                    "updated_at": "2026-11-14T09:30:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/qr/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Identifiant du QR code (`id`).",
+          "schema": {
+            "type": "string"
+          },
+          "example": "q_8f2k1d0c"
+        }
+      ],
+      "get": {
+        "operationId": "getQrCode",
+        "tags": [
+          "QR codes"
+        ],
+        "summary": "Lire un QR code",
+        "responses": {
+          "200": {
+            "description": "Le QR code.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/QrCode"
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "id": "q_8f2k1d0c",
+                    "code": "aB3x9Q",
+                    "name": "Affiche vitrine",
+                    "type": "url",
+                    "destination": "https://exemple.fr/offre",
+                    "page": null,
+                    "state": "active",
+                    "short_url": "https://qravate.page/aB3x9Q",
+                    "folder_id": null,
+                    "rules": [],
+                    "rules_clock": "paris",
+                    "utm": null,
+                    "served_destination": "https://exemple.fr/offre",
+                    "gs1": null,
+                    "created_at": "2026-11-14T09:30:00.000Z",
+                    "updated_at": "2026-11-14T09:30:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateQrCode",
+        "tags": [
+          "QR codes"
+        ],
+        "summary": "Modifier un QR code",
+        "description": "Change la destination, le nom, le dossier, le design, l’état, les règles ou les UTM. Le code imprimé ne change pas. Émet `qr.destination_changed` ou `qr.state_changed` selon le cas.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QrUpdate"
+              },
+              "examples": {
+                "destination": {
+                  "summary": "Changer la destination",
+                  "value": {
+                    "destination": "https://exemple.fr/nouvelle-offre"
+                  }
+                },
+                "pause": {
+                  "summary": "Mettre en pause",
+                  "value": {
+                    "state": "paused"
+                  }
+                },
+                "ab": {
+                  "summary": "Test A/B",
+                  "value": {
+                    "rules": [
+                      {
+                        "name": "Test A/B",
+                        "when": {},
+                        "to": [
+                          {
+                            "url": "https://exemple.fr/a",
+                            "weight": 50
+                          },
+                          {
+                            "url": "https://exemple.fr/b",
+                            "weight": 50
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "utm": {
+                  "summary": "UTM personnalisés",
+                  "value": {
+                    "utm": {
+                      "source": "flyer",
+                      "medium": "qr",
+                      "campaign": "printemps"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "QR code modifié.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/QrCode"
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "id": "q_8f2k1d0c",
+                    "code": "aB3x9Q",
+                    "name": "Affiche vitrine",
+                    "type": "url",
+                    "destination": "https://exemple.fr/nouvelle-offre",
+                    "page": null,
+                    "state": "active",
+                    "short_url": "https://qravate.page/aB3x9Q",
+                    "folder_id": null,
+                    "rules": [],
+                    "rules_clock": "paris",
+                    "utm": null,
+                    "served_destination": "https://exemple.fr/nouvelle-offre",
+                    "gs1": null,
+                    "created_at": "2026-11-14T09:30:00.000Z",
+                    "updated_at": "2026-11-14T09:30:00.000Z"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteQrCode",
+        "tags": [
+          "QR codes"
+        ],
+        "summary": "Supprimer un QR code",
+        "description": "Le QR code cesse de rediriger. Il reste restaurable 30 jours depuis l’application, puis il est effacé ; son code n’est jamais réattribué. Émet `qr.state_changed`.",
+        "responses": {
+          "200": {
+            "description": "QR code supprimé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "deleted": {
+                          "type": "boolean"
+                        },
+                        "restorable_days": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "deleted": true,
+                    "restorable_days": 30
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/qr/{id}/image.svg": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Identifiant du QR code (`id`).",
+          "schema": {
+            "type": "string"
+          },
+          "example": "q_8f2k1d0c"
+        }
+      ],
+      "get": {
+        "operationId": "getQrImage",
+        "tags": [
+          "QR codes"
+        ],
+        "summary": "Image SVG",
+        "description": "Image vectorielle du QR code avec son design et son logo, prête à imprimer à toute taille.",
+        "responses": {
+          "200": {
+            "description": "Image SVG.",
+            "content": {
+              "image/svg+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/qr/{id}/schedules": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Identifiant du QR code (`id`).",
+          "schema": {
+            "type": "string"
+          },
+          "example": "q_8f2k1d0c"
+        }
+      ],
+      "get": {
+        "operationId": "listSchedules",
+        "tags": [
+          "Changements programmés"
+        ],
+        "summary": "Lister les changements programmés",
+        "description": "Changements en attente d’abord, du plus proche au plus lointain, puis l’historique (100 au plus).",
+        "responses": {
+          "200": {
+            "description": "Changements programmés.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Schedule"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "id": "s_41c9e2",
+                      "qr_id": "q_8f2k1d0c",
+                      "run_at": "2026-12-01T07:00:00.000Z",
+                      "destination": "https://exemple.fr/noel",
+                      "status": "pending",
+                      "error": null,
+                      "created_at": "2026-11-14T09:35:00.000Z",
+                      "done_at": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createSchedule",
+        "tags": [
+          "Changements programmés"
+        ],
+        "summary": "Programmer un changement de destination",
+        "description": "La nouvelle destination s’applique dans le quart d’heure qui suit `run_at`. D’une minute à deux ans à l’avance ; 5 changements en attente au plus par QR code. Réservé aux QR codes qui redirigent vers une URL.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "run_at",
+                  "destination"
+                ],
+                "properties": {
+                  "run_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "ISO 8601 avec fuseau."
+                  },
+                  "destination": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                }
+              },
+              "example": {
+                "run_at": "2026-12-01T08:00:00+01:00",
+                "destination": "https://exemple.fr/noel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Changement programmé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Schedule"
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "id": "s_41c9e2",
+                    "qr_id": "q_8f2k1d0c",
+                    "run_at": "2026-12-01T07:00:00.000Z",
+                    "destination": "https://exemple.fr/noel",
+                    "status": "pending",
+                    "error": null,
+                    "created_at": "2026-11-14T09:35:00.000Z",
+                    "done_at": null
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/qr/{id}/schedules/{schedule_id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Identifiant du QR code (`id`).",
+          "schema": {
+            "type": "string"
+          },
+          "example": "q_8f2k1d0c"
+        },
+        {
+          "name": "schedule_id",
+          "in": "path",
+          "required": true,
+          "description": "Identifiant du changement programmé.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "delete": {
+        "operationId": "cancelSchedule",
+        "tags": [
+          "Changements programmés"
+        ],
+        "summary": "Annuler un changement programmé",
+        "description": "Seul un changement en attente (`pending`) peut être annulé.",
+        "responses": {
+          "200": {
+            "description": "Changement annulé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "cancelled": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "cancelled": true
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/qr/{id}/stats": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Identifiant du QR code (`id`).",
+          "schema": {
+            "type": "string"
+          },
+          "example": "q_8f2k1d0c"
+        }
+      ],
+      "get": {
+        "operationId": "getQrStats",
+        "tags": [
+          "Statistiques"
+        ],
+        "summary": "Statistiques d’un QR code",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Premier jour (AAAA-MM-JJ, heure de Paris). Par défaut, il y a 29 jours.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Dernier jour inclus. Par défaut, aujourd’hui.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Statistiques de la période.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Stats"
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "from": "2026-11-01",
+                    "to": "2026-11-03",
+                    "days": [
+                      {
+                        "day": "2026-11-01",
+                        "scans": 42,
+                        "uniques": 37
+                      },
+                      {
+                        "day": "2026-11-02",
+                        "scans": 18,
+                        "uniques": 16
+                      },
+                      {
+                        "day": "2026-11-03",
+                        "scans": 25,
+                        "uniques": 22
+                      }
+                    ],
+                    "total": 85,
+                    "uniques": 75,
+                    "dims": {
+                      "country": [
+                        {
+                          "value": "FR",
+                          "scans": 71
+                        },
+                        {
+                          "value": "BE",
+                          "scans": 14
+                        }
+                      ],
+                      "city": [
+                        {
+                          "value": "Lyon",
+                          "scans": 40
+                        },
+                        {
+                          "value": "Bruxelles",
+                          "scans": 14
+                        }
+                      ],
+                      "device": [
+                        {
+                          "value": "mobile",
+                          "scans": 80
+                        },
+                        {
+                          "value": "tablet",
+                          "scans": 5
+                        }
+                      ],
+                      "os": [
+                        {
+                          "value": "ios",
+                          "scans": 47
+                        },
+                        {
+                          "value": "android",
+                          "scans": 38
+                        }
+                      ],
+                      "browser": [
+                        {
+                          "value": "safari",
+                          "scans": 45
+                        },
+                        {
+                          "value": "chrome",
+                          "scans": 40
+                        }
+                      ],
+                      "language": [
+                        {
+                          "value": "fr",
+                          "scans": 76
+                        },
+                        {
+                          "value": "en",
+                          "scans": 9
+                        }
+                      ],
+                      "rule": [
+                        {
+                          "value": "Menu anglais",
+                          "scans": 9
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "operationId": "getStats",
+        "tags": [
+          "Statistiques"
+        ],
+        "summary": "Statistiques de l’espace",
+        "description": "Tous les QR codes de l’espace, sur la période.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Premier jour (AAAA-MM-JJ, heure de Paris). Par défaut, il y a 29 jours.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Dernier jour inclus. Par défaut, aujourd’hui.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Statistiques de la période.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Stats"
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "from": "2026-11-01",
+                    "to": "2026-11-03",
+                    "days": [
+                      {
+                        "day": "2026-11-01",
+                        "scans": 42,
+                        "uniques": 37
+                      },
+                      {
+                        "day": "2026-11-02",
+                        "scans": 18,
+                        "uniques": 16
+                      },
+                      {
+                        "day": "2026-11-03",
+                        "scans": 25,
+                        "uniques": 22
+                      }
+                    ],
+                    "total": 85,
+                    "uniques": 75,
+                    "dims": {
+                      "country": [
+                        {
+                          "value": "FR",
+                          "scans": 71
+                        },
+                        {
+                          "value": "BE",
+                          "scans": 14
+                        }
+                      ],
+                      "city": [
+                        {
+                          "value": "Lyon",
+                          "scans": 40
+                        },
+                        {
+                          "value": "Bruxelles",
+                          "scans": 14
+                        }
+                      ],
+                      "device": [
+                        {
+                          "value": "mobile",
+                          "scans": 80
+                        },
+                        {
+                          "value": "tablet",
+                          "scans": 5
+                        }
+                      ],
+                      "os": [
+                        {
+                          "value": "ios",
+                          "scans": 47
+                        },
+                        {
+                          "value": "android",
+                          "scans": 38
+                        }
+                      ],
+                      "browser": [
+                        {
+                          "value": "safari",
+                          "scans": 45
+                        },
+                        {
+                          "value": "chrome",
+                          "scans": 40
+                        }
+                      ],
+                      "language": [
+                        {
+                          "value": "fr",
+                          "scans": 76
+                        },
+                        {
+                          "value": "en",
+                          "scans": 9
+                        }
+                      ],
+                      "rule": [
+                        {
+                          "value": "Menu anglais",
+                          "scans": 9
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/webhooks": {
+      "get": {
+        "operationId": "listWebhooks",
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Lister les webhooks",
+        "responses": {
+          "200": {
+            "description": "Webhooks de l’espace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Webhook"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "id": "h_7d1e0b",
+                      "url": "https://exemple.fr/hooks/qravate",
+                      "events": "qr.created,scans.threshold",
+                      "scan_threshold": 1000,
+                      "source": "api",
+                      "disabled_at": null,
+                      "created_at": "2026-11-14T09:40:00.000Z"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWebhook",
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Abonner un webhook",
+        "description": "Abonne une URL en https (REST hook). Le `secret` de signature n’est renvoyé qu’à la création.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url",
+                  "events"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "URL en https."
+                  },
+                  "events": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "qr.created",
+                        "qr.destination_changed",
+                        "qr.state_changed",
+                        "scans.threshold"
+                      ]
+                    },
+                    "minItems": 1
+                  },
+                  "scan_threshold": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Nombre de scans qui déclenche `scans.threshold`."
+                  },
+                  "source": {
+                    "type": "string",
+                    "maxLength": 20,
+                    "default": "api",
+                    "description": "Origine affichée dans l’application."
+                  }
+                }
+              },
+              "example": {
+                "url": "https://exemple.fr/hooks/qravate",
+                "events": [
+                  "qr.created",
+                  "scans.threshold"
+                ],
+                "scan_threshold": 1000
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Webhook créé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "secret": {
+                          "type": "string",
+                          "description": "Secret de signature, affiché une seule fois."
+                        },
+                        "events": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "id": "h_7d1e0b",
+                    "secret": "whsec_9f8e7d6c5b4a3f2e1d0c9b8a",
+                    "events": [
+                      "qr.created",
+                      "scans.threshold"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/webhooks/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Identifiant du webhook.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "delete": {
+        "operationId": "deleteWebhook",
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Désabonner un webhook",
+        "responses": {
+          "200": {
+            "description": "Webhook supprimé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "deleted": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": {
+                    "deleted": true
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "qr.created": {
+      "post": {
+        "summary": "qr.created",
+        "description": "Un QR code est créé, depuis l’application, l’API, un import ou un assistant IA. `data` est le QR code.",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "X-Webhook-Signature",
+            "in": "header",
+            "required": true,
+            "description": "`t=<horodatage>,v1=<HMAC-SHA256 hexadécimal de t + \".\" + corps>`, avec le secret du webhook.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "t=1763114531,v1=5d41402abc4b2a76b9719d911017c592"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "event",
+                  "created_at",
+                  "data"
+                ],
+                "properties": {
+                  "event": {
+                    "type": "string",
+                    "const": "qr.created"
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Date de l’événement."
+                  },
+                  "data": {
+                    "$ref": "#/components/schemas/QrCode"
+                  }
+                }
+              },
+              "example": {
+                "event": "qr.created",
+                "created_at": "2026-11-14T10:02:11.000Z",
+                "data": {
+                  "id": "q_8f2k1d0c",
+                  "code": "aB3x9Q",
+                  "name": "Affiche vitrine",
+                  "type": "url",
+                  "destination": "https://exemple.fr/offre",
+                  "page": null,
+                  "state": "active",
+                  "short_url": "https://qravate.page/aB3x9Q",
+                  "folder_id": null,
+                  "rules": [],
+                  "rules_clock": "paris",
+                  "utm": null,
+                  "served_destination": "https://exemple.fr/offre",
+                  "gs1": null,
+                  "created_at": "2026-11-14T09:30:00.000Z",
+                  "updated_at": "2026-11-14T09:30:00.000Z"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Envoi reçu. Tout statut 2xx convient."
+          },
+          "410": {
+            "description": "Désabonne le webhook."
+          }
+        }
+      }
+    },
+    "qr.destination_changed": {
+      "post": {
+        "summary": "qr.destination_changed",
+        "description": "La destination ou la page hébergée change, y compris par un changement programmé. `data` est le QR code modifié.",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "X-Webhook-Signature",
+            "in": "header",
+            "required": true,
+            "description": "`t=<horodatage>,v1=<HMAC-SHA256 hexadécimal de t + \".\" + corps>`, avec le secret du webhook.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "t=1763114531,v1=5d41402abc4b2a76b9719d911017c592"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "event",
+                  "created_at",
+                  "data"
+                ],
+                "properties": {
+                  "event": {
+                    "type": "string",
+                    "const": "qr.destination_changed"
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Date de l’événement."
+                  },
+                  "data": {
+                    "$ref": "#/components/schemas/QrCode"
+                  }
+                }
+              },
+              "example": {
+                "event": "qr.destination_changed",
+                "created_at": "2026-11-14T10:02:11.000Z",
+                "data": {
+                  "id": "q_8f2k1d0c",
+                  "code": "aB3x9Q",
+                  "name": "Affiche vitrine",
+                  "type": "url",
+                  "destination": "https://exemple.fr/nouvelle-offre",
+                  "page": null,
+                  "state": "active",
+                  "short_url": "https://qravate.page/aB3x9Q",
+                  "folder_id": null,
+                  "rules": [],
+                  "rules_clock": "paris",
+                  "utm": null,
+                  "served_destination": "https://exemple.fr/offre",
+                  "gs1": null,
+                  "created_at": "2026-11-14T09:30:00.000Z",
+                  "updated_at": "2026-11-14T09:30:00.000Z"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Envoi reçu. Tout statut 2xx convient."
+          },
+          "410": {
+            "description": "Désabonne le webhook."
+          }
+        }
+      }
+    },
+    "qr.state_changed": {
+      "post": {
+        "summary": "qr.state_changed",
+        "description": "Un QR code est mis en pause, réactivé ou supprimé (`state: deleted`). `data` est le QR code.",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "X-Webhook-Signature",
+            "in": "header",
+            "required": true,
+            "description": "`t=<horodatage>,v1=<HMAC-SHA256 hexadécimal de t + \".\" + corps>`, avec le secret du webhook.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "t=1763114531,v1=5d41402abc4b2a76b9719d911017c592"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "event",
+                  "created_at",
+                  "data"
+                ],
+                "properties": {
+                  "event": {
+                    "type": "string",
+                    "const": "qr.state_changed"
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Date de l’événement."
+                  },
+                  "data": {
+                    "$ref": "#/components/schemas/QrCode"
+                  }
+                }
+              },
+              "example": {
+                "event": "qr.state_changed",
+                "created_at": "2026-11-14T10:02:11.000Z",
+                "data": {
+                  "id": "q_8f2k1d0c",
+                  "code": "aB3x9Q",
+                  "name": "Affiche vitrine",
+                  "type": "url",
+                  "destination": "https://exemple.fr/offre",
+                  "page": null,
+                  "state": "paused",
+                  "short_url": "https://qravate.page/aB3x9Q",
+                  "folder_id": null,
+                  "rules": [],
+                  "rules_clock": "paris",
+                  "utm": null,
+                  "served_destination": "https://exemple.fr/offre",
+                  "gs1": null,
+                  "created_at": "2026-11-14T09:30:00.000Z",
+                  "updated_at": "2026-11-14T09:30:00.000Z"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Envoi reçu. Tout statut 2xx convient."
+          },
+          "410": {
+            "description": "Désabonne le webhook."
+          }
+        }
+      }
+    },
+    "scans.threshold": {
+      "post": {
+        "summary": "scans.threshold",
+        "description": "Un QR code atteint `scan_threshold` scans au total. Vérifié toutes les heures, une seule fois par QR code et par webhook.",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "X-Webhook-Signature",
+            "in": "header",
+            "required": true,
+            "description": "`t=<horodatage>,v1=<HMAC-SHA256 hexadécimal de t + \".\" + corps>`, avec le secret du webhook.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "t=1763114531,v1=5d41402abc4b2a76b9719d911017c592"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "event",
+                  "created_at",
+                  "data"
+                ],
+                "properties": {
+                  "event": {
+                    "type": "string",
+                    "const": "scans.threshold"
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Date de l’événement."
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "qr": {
+                        "$ref": "#/components/schemas/QrCode"
+                      },
+                      "threshold": {
+                        "type": "integer"
+                      },
+                      "total_scans": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              },
+              "example": {
+                "event": "scans.threshold",
+                "created_at": "2026-11-14T10:02:11.000Z",
+                "data": {
+                  "qr": {
+                    "id": "q_8f2k1d0c",
+                    "code": "aB3x9Q",
+                    "name": "Affiche vitrine",
+                    "type": "url",
+                    "destination": "https://exemple.fr/offre",
+                    "page": null,
+                    "state": "active",
+                    "short_url": "https://qravate.page/aB3x9Q",
+                    "folder_id": null,
+                    "rules": [],
+                    "rules_clock": "paris",
+                    "utm": null,
+                    "served_destination": "https://exemple.fr/offre",
+                    "gs1": null,
+                    "created_at": "2026-11-14T09:30:00.000Z",
+                    "updated_at": "2026-11-14T09:30:00.000Z"
+                  },
+                  "threshold": 1000,
+                  "total_scans": 1012
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Envoi reçu. Tout statut 2xx convient."
+          },
+          "410": {
+            "description": "Désabonne le webhook."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "sk_…",
+        "description": "Clé secrète créée dans [API et webhooks](https://www.qravate.com/app/api), envoyée dans `Authorization: Bearer sk_…`."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "Corps de toutes les réponses en erreur.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Code stable, à utiliser dans vos traitements.",
+                "enum": [
+                  "invalid_request",
+                  "unauthorized",
+                  "plan_required",
+                  "plan_limit",
+                  "read_only",
+                  "blocked",
+                  "not_found",
+                  "deleted",
+                  "destination_blocked",
+                  "rate_limited"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "description": "Explication en français, à montrer telle quelle."
+              }
+            }
+          }
+        }
+      },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "workspace": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Identifiant de l’espace de travail."
+              },
+              "name": {
+                "type": "string",
+                "description": "Nom de l’espace."
+              },
+              "plan": {
+                "type": "string",
+                "description": "Plan en cours.",
+                "examples": [
+                  "Pro"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "QrCode": {
+        "type": "object",
+        "description": "Un QR code dynamique.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Identifiant d’API, à passer dans les chemins `/qr/{id}`."
+          },
+          "code": {
+            "type": "string",
+            "description": "Partie courte de l’adresse encodée. Jamais réattribuée."
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "description": "Nom interne, visible seulement dans votre espace."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "url",
+              "page"
+            ],
+            "description": "`url` : redirige vers `destination`. `page` : affiche une page hébergée."
+          },
+          "destination": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri",
+            "description": "Destination principale (QR de type `url`)."
+          },
+          "page": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HostedPage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Page hébergée (QR de type `page`)."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused",
+              "deleted",
+              "blocked"
+            ],
+            "description": "État du QR code. Voir « QR codes et états » dans l’introduction."
+          },
+          "short_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Adresse encodée dans le QR code, sur le domaine de scan ou votre domaine personnalisé."
+          },
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Dossier du QR code."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rule"
+            },
+            "description": "Règles de redirection, dans l’ordre d’évaluation."
+          },
+          "rules_clock": {
+            "type": "string",
+            "enum": [
+              "paris",
+              "scanner"
+            ],
+            "description": "Heure des conditions de jour, d’heure et de date."
+          },
+          "utm": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Utm"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Paramètres UTM ajoutés à la destination, ou `null`."
+          },
+          "served_destination": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri",
+            "description": "Adresse réellement ouverte au scan, UTM compris, hors règles."
+          },
+          "gs1": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Gs1"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Produit GS1 Digital Link, ou `null`. Avec un produit, `short_url` est l’adresse GS1 Digital Link (`…/01/<GTIN>`)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "example": {
+          "id": "q_8f2k1d0c",
+          "code": "aB3x9Q",
+          "name": "Affiche vitrine",
+          "type": "url",
+          "destination": "https://exemple.fr/offre",
+          "page": null,
+          "state": "active",
+          "short_url": "https://qravate.page/aB3x9Q",
+          "folder_id": null,
+          "rules": [],
+          "rules_clock": "paris",
+          "utm": null,
+          "served_destination": "https://exemple.fr/offre",
+          "gs1": null,
+          "created_at": "2026-11-14T09:30:00.000Z",
+          "updated_at": "2026-11-14T09:30:00.000Z"
+        }
+      },
+      "QrCreate": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "description": "Indiquez `destination` pour un QR qui redirige, ou `page` pour une page hébergée.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "description": "Nom interne du QR code."
+          },
+          "destination": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL de destination (http ou https). Contrôlée par l’anti-abus."
+          },
+          "page": {
+            "$ref": "#/components/schemas/HostedPage"
+          },
+          "folder_id": {
+            "type": "string",
+            "description": "Dossier où ranger le QR code."
+          },
+          "design": {
+            "$ref": "#/components/schemas/Design"
+          },
+          "domain_id": {
+            "type": "string",
+            "description": "Domaine personnalisé vérifié, à la place du domaine de scan."
+          },
+          "custom_path": {
+            "type": "string",
+            "description": "Chemin sur le domaine personnalisé (lettres, chiffres, tirets, points et barres obliques). Par défaut, le code court."
+          },
+          "utm": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "$ref": "#/components/schemas/Utm"
+              }
+            ],
+            "default": false,
+            "description": "`true` pour les valeurs par défaut, un objet pour les personnaliser."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rule"
+            }
+          },
+          "rules_clock": {
+            "type": "string",
+            "enum": [
+              "paris",
+              "scanner"
+            ],
+            "default": "paris"
+          },
+          "gs1": {
+            "$ref": "#/components/schemas/Gs1"
+          }
+        }
+      },
+      "QrUpdate": {
+        "type": "object",
+        "description": "Seuls les champs présents sont modifiés.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "destination": {
+            "type": "string",
+            "format": "uri",
+            "description": "Nouvelle destination, effective en une minute environ."
+          },
+          "page": {
+            "$ref": "#/components/schemas/HostedPage"
+          },
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "design": {
+            "$ref": "#/components/schemas/Design"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "description": "Met en pause ou réactive le QR code."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rule"
+            },
+            "description": "Remplace toutes les règles. Une liste vide les retire."
+          },
+          "rules_clock": {
+            "type": "string",
+            "enum": [
+              "paris",
+              "scanner"
+            ]
+          },
+          "utm": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "$ref": "#/components/schemas/Utm"
+              }
+            ]
+          },
+          "gs1": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Gs1"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Remplace le produit GS1 et ses liens ; `null` le retire. L’adresse encodée change : retéléchargez le code."
+          }
+        }
+      },
+      "Gs1": {
+        "type": "object",
+        "required": [
+          "gtin"
+        ],
+        "description": "Produit GS1 Digital Link (plans Pro et Max). Le QR suit la norme : redirection 307, `?linkType=` pour un type de lien, `?linkType=all` pour l’ensemble des liens (application/linkset+json), langue selon le téléphone.",
+        "properties": {
+          "gtin": {
+            "type": "string",
+            "pattern": "^[0-9]{8,14}$",
+            "description": "GTIN de 8, 12, 13 ou 14 chiffres, clé de contrôle vérifiée. Rendu sur 14 chiffres. Un seul QR actif par GTIN dans l’espace."
+          },
+          "links": {
+            "type": "array",
+            "maxItems": 30,
+            "description": "Liens typés, en plus de `destination` (le lien par défaut).",
+            "items": {
+              "type": "object",
+              "required": [
+                "type",
+                "url"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "description": "Type du vocabulaire GS1 : `gs1:pip`, `gs1:recallStatus`, `gs1:instructions`, `gs1:allergenInfo`, `gs1:nutritionalInfo`, `gs1:dpp`… ; `gs1:defaultLinkMulti` pour le lien par défaut dans une autre langue."
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "lang": {
+                  "type": "string",
+                  "pattern": "^[a-z]{2}$",
+                  "description": "Langue du contenu (ISO 639-1)."
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 120
+                }
+              }
+            }
+          },
+          "forward": {
+            "type": "boolean",
+            "default": false,
+            "description": "Ajoute `lot`, `serial` et `expiry` lus dans l’adresse scannée à la page ouverte."
+          }
+        },
+        "example": {
+          "gtin": "3760123456784",
+          "links": [
+            {
+              "type": "gs1:recallStatus",
+              "url": "https://exemple.fr/rappel"
+            },
+            {
+              "type": "gs1:pip",
+              "url": "https://exemple.fr/en/product",
+              "lang": "en"
+            }
+          ],
+          "forward": true
+        }
+      },
+      "Rule": {
+        "type": "object",
+        "required": [
+          "to"
+        ],
+        "description": "La première règle active dont toutes les conditions sont remplies l’emporte.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Attribué par le serveur."
+          },
+          "name": {
+            "type": "string",
+            "description": "Nom affiché dans les statistiques (dimension `rule`)."
+          },
+          "active": {
+            "type": "boolean",
+            "default": true
+          },
+          "when": {
+            "$ref": "#/components/schemas/RuleConditions"
+          },
+          "to": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/components/schemas/RuleDestination"
+            },
+            "description": "Une destination, ou de 2 à 4 avec `weight` pour un test A/B (plan Pro)."
+          }
+        }
+      },
+      "RuleConditions": {
+        "type": "object",
+        "description": "Toutes les conditions présentes doivent être remplies. Un objet vide s’applique toujours.",
+        "properties": {
+          "device": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "mobile",
+                "tablet",
+                "desktop"
+              ]
+            }
+          },
+          "os": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "ios",
+                "android",
+                "windows",
+                "macos",
+                "linux",
+                "other"
+              ]
+            }
+          },
+          "app": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "instagram",
+                "facebook",
+                "messenger",
+                "linkedin",
+                "tiktok",
+                "snapchat",
+                "google",
+                "wechat",
+                "line",
+                "browser"
+              ]
+            },
+            "description": "Application dans laquelle le lien s’ouvre."
+          },
+          "lang": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Langues du téléphone (`fr`, `en`…)."
+          },
+          "country": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$"
+            },
+            "description": "Pays ISO 3166-1 alpha-2."
+          },
+          "weekday": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 7
+            },
+            "description": "1 = lundi … 7 = dimanche."
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "pattern": "^\\d{2}:\\d{2}$"
+              },
+              "to": {
+                "type": "string",
+                "pattern": "^\\d{2}:\\d{2}$"
+              }
+            },
+            "description": "Plage horaire HH:MM."
+          },
+          "date": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "format": "date"
+              },
+              "to": {
+                "type": "string",
+                "format": "date"
+              }
+            },
+            "description": "Période, bornes incluses."
+          }
+        }
+      },
+      "RuleDestination": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99,
+            "description": "Part du trafic, en %. La somme des poids vaut 100."
+          }
+        }
+      },
+      "Utm": {
+        "type": "object",
+        "description": "Paramètres UTM. Une destination qui contient déjà un `utm_*` n’est jamais modifiée.",
+        "properties": {
+          "source": {
+            "type": "string",
+            "default": "qravate"
+          },
+          "medium": {
+            "type": "string",
+            "default": "qr"
+          },
+          "campaign": {
+            "type": "string",
+            "description": "Par défaut, le nom du QR code."
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "Design": {
+        "type": "object",
+        "description": "Apparence du QR code. Tous les champs sont facultatifs ; une valeur invalide reprend la valeur par défaut.",
+        "properties": {
+          "fg": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "default": "#000000",
+            "description": "Couleur des modules."
+          },
+          "bg": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "default": "#ffffff",
+            "description": "Couleur du fond."
+          },
+          "transparent": {
+            "type": "boolean",
+            "default": false,
+            "description": "Fond transparent."
+          },
+          "gradient": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "to": {
+                "type": "string",
+                "description": "Seconde couleur."
+              },
+              "angle": {
+                "type": "number"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "linear",
+                  "radial"
+                ]
+              }
+            },
+            "description": "Dégradé sur les modules."
+          },
+          "moduleShape": {
+            "type": "string",
+            "enum": [
+              "square",
+              "rounded",
+              "dot",
+              "diamond",
+              "stripes",
+              "fluid"
+            ],
+            "default": "square"
+          },
+          "eyeShape": {
+            "type": "string",
+            "enum": [
+              "square",
+              "rounded",
+              "circle",
+              "leaf"
+            ],
+            "default": "square",
+            "description": "Contour des trois repères."
+          },
+          "eyeInner": {
+            "type": "string",
+            "enum": [
+              "square",
+              "rounded",
+              "circle",
+              "diamond"
+            ],
+            "default": "square",
+            "description": "Centre des repères."
+          },
+          "eyeColor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Couleur des repères ; celle des modules par défaut."
+          },
+          "logo": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Logo central : une icône prédéfinie (`icon`), dessinée de la couleur des yeux, ou un logo ajouté depuis l’application. Taille en part de la largeur (0,10 à 0,24).",
+            "properties": {
+              "icon": {
+                "type": "string",
+                "enum": [
+                  "wifi",
+                  "menu",
+                  "coffee",
+                  "wine",
+                  "star",
+                  "thumbs-up",
+                  "heart",
+                  "message",
+                  "phone",
+                  "mail",
+                  "map-pin",
+                  "calendar",
+                  "booking",
+                  "ticket",
+                  "document",
+                  "form",
+                  "link",
+                  "globe",
+                  "cart",
+                  "bag",
+                  "promo",
+                  "tag",
+                  "gift",
+                  "payment",
+                  "contact",
+                  "team",
+                  "video",
+                  "music",
+                  "camera",
+                  "download",
+                  "app",
+                  "info",
+                  "home",
+                  "key",
+                  "car",
+                  "parking",
+                  "hotel",
+                  "sport",
+                  "school",
+                  "health",
+                  "beauty",
+                  "pets",
+                  "nature",
+                  "business"
+                ],
+                "description": "Icône prédéfinie : wifi, menu, star (avis), document, booking…"
+              },
+              "size": {
+                "type": "number"
+              },
+              "zone": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "square",
+                  "round"
+                ]
+              }
+            }
+          },
+          "frame": {
+            "type": "object",
+            "description": "Cadre avec appel à l’action.",
+            "properties": {
+              "style": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "bottom",
+                  "top",
+                  "box",
+                  "badge"
+                ],
+                "default": "none"
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 40,
+                "default": "Scannez-moi"
+              },
+              "color": {
+                "type": "string"
+              },
+              "textColor": {
+                "type": "string"
+              },
+              "font": {
+                "type": "string",
+                "enum": [
+                  "sans",
+                  "serif",
+                  "mono"
+                ]
+              },
+              "caps": {
+                "type": "boolean"
+              }
+            }
+          },
+          "ecc": {
+            "type": "string",
+            "enum": [
+              "L",
+              "M",
+              "Q",
+              "H"
+            ],
+            "default": "M",
+            "description": "Correction d’erreur, relevée automatiquement si le design l’exige."
+          },
+          "margin": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 6,
+            "default": 4,
+            "description": "Marge autour du code, en modules."
+          },
+          "corners": {
+            "type": "string",
+            "enum": [
+              "square",
+              "round"
+            ],
+            "default": "square"
+          }
+        }
+      },
+      "HostedPage": {
+        "type": "object",
+        "required": [
+          "kind",
+          "title"
+        ],
+        "description": "Page servie sur le domaine de scan, sans script ni cookie. Les pages PDF se créent depuis l’application (envoi du fichier).",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "menu",
+              "links",
+              "vcard",
+              "pdf"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "description": "Couleur d’accent."
+          },
+          "sections": {
+            "type": "array",
+            "maxItems": 30,
+            "description": "`menu` : sections et plats.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "items": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "name"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "price": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "links": {
+            "type": "array",
+            "maxItems": 30,
+            "description": "`links` : liste de liens.",
+            "items": {
+              "type": "object",
+              "required": [
+                "label",
+                "url"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              }
+            }
+          },
+          "contact": {
+            "type": "object",
+            "description": "`vcard` : fiche contact, enregistrable dans le carnet d’adresses.",
+            "properties": {
+              "firstName": {
+                "type": "string"
+              },
+              "lastName": {
+                "type": "string"
+              },
+              "organization": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "phone": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              },
+              "website": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "example": {
+          "kind": "links",
+          "title": "Nous suivre",
+          "links": [
+            {
+              "label": "Site",
+              "url": "https://exemple.fr"
+            },
+            {
+              "label": "Instagram",
+              "url": "https://instagram.com/exemple"
+            }
+          ]
+        }
+      },
+      "Schedule": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "qr_id": {
+            "type": "string"
+          },
+          "run_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Date prévue, en UTC."
+          },
+          "destination": {
+            "type": "string",
+            "format": "uri"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "applied",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Raison de l’échec (`failed`)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "done_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "example": {
+          "id": "s_41c9e2",
+          "qr_id": "q_8f2k1d0c",
+          "run_at": "2026-12-01T07:00:00.000Z",
+          "destination": "https://exemple.fr/noel",
+          "status": "pending",
+          "error": null,
+          "created_at": "2026-11-14T09:35:00.000Z",
+          "done_at": null
+        }
+      },
+      "Stats": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date",
+            "description": "Début réel de la période, après application de l’historique du plan."
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "scans": {
+                  "type": "integer"
+                },
+                "uniques": {
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "Un élément par jour de Paris, jours sans scan compris."
+          },
+          "total": {
+            "type": "integer",
+            "description": "Scans sur la période."
+          },
+          "uniques": {
+            "type": "integer",
+            "description": "Somme des visiteurs uniques quotidiens, estimés sans cookie."
+          },
+          "dims": {
+            "type": "object",
+            "description": "Répartition des scans, de la valeur la plus fréquente à la moins fréquente.",
+            "properties": {
+              "country": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "scans": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "city": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "scans": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "device": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "scans": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "os": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "scans": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "browser": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "scans": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "language": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "scans": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "rule": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "scans": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "example": {
+          "from": "2026-11-01",
+          "to": "2026-11-03",
+          "days": [
+            {
+              "day": "2026-11-01",
+              "scans": 42,
+              "uniques": 37
+            },
+            {
+              "day": "2026-11-02",
+              "scans": 18,
+              "uniques": 16
+            },
+            {
+              "day": "2026-11-03",
+              "scans": 25,
+              "uniques": 22
+            }
+          ],
+          "total": 85,
+          "uniques": 75,
+          "dims": {
+            "country": [
+              {
+                "value": "FR",
+                "scans": 71
+              },
+              {
+                "value": "BE",
+                "scans": 14
+              }
+            ],
+            "city": [
+              {
+                "value": "Lyon",
+                "scans": 40
+              },
+              {
+                "value": "Bruxelles",
+                "scans": 14
+              }
+            ],
+            "device": [
+              {
+                "value": "mobile",
+                "scans": 80
+              },
+              {
+                "value": "tablet",
+                "scans": 5
+              }
+            ],
+            "os": [
+              {
+                "value": "ios",
+                "scans": 47
+              },
+              {
+                "value": "android",
+                "scans": 38
+              }
+            ],
+            "browser": [
+              {
+                "value": "safari",
+                "scans": 45
+              },
+              {
+                "value": "chrome",
+                "scans": 40
+              }
+            ],
+            "language": [
+              {
+                "value": "fr",
+                "scans": 76
+              },
+              {
+                "value": "en",
+                "scans": 9
+              }
+            ],
+            "rule": [
+              {
+                "value": "Menu anglais",
+                "scans": 9
+              }
+            ]
+          }
+        }
+      },
+      "Webhook": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "string",
+            "description": "Événements, séparés par des virgules."
+          },
+          "scan_threshold": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "Origine de l’abonnement : `api`, `zapier`, `make`, `n8n`…"
+          },
+          "disabled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Désactivé après 20 échecs ou une réponse 410."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Requête invalide.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "invalid_request",
+                "message": "Corps JSON invalide."
+              }
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Clé absente, invalide ou révoquée.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "unauthorized",
+                "message": "Clé d’API invalide ou révoquée."
+              }
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Plan sans API, limite du plan atteinte, compte en lecture seule ou QR code bloqué.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "plan_limit",
+                "message": "Limite de votre plan atteinte (500 QR codes dynamiques)."
+              }
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Ressource introuvable dans cet espace.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "not_found",
+                "message": "QR code introuvable."
+              }
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Opération impossible dans l’état actuel.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "deleted",
+                "message": "Ce QR code est supprimé : restaurez-le d’abord."
+              }
+            }
+          }
+        }
+      },
+      "Unprocessable": {
+        "description": "Destination refusée par l’anti-abus.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "destination_blocked",
+                "message": "Cette destination figure sur une liste de sites dangereux et ne peut pas être utilisée."
+              }
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "Limite de débit atteinte.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "rate_limited",
+                "message": "Limite de 120 requêtes par minute atteinte."
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "externalDocs": {
+    "description": "Assistants IA : serveur MCP https://www.qravate.com/mcp",
+    "url": "https://www.qravate.com/ai"
+  }
+}

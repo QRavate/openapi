@@ -1,0 +1,52 @@
+name: Sync the specification
+
+# Copies the specification served by the QRavate API and opens a pull request when it changed.
+# Runs after each production deployment of QRavate (repository_dispatch "api-deployed"),
+# every day as a fallback, and on demand.
+#
+# Needs "Allow GitHub Actions to create and approve pull requests"
+# (organization and repository Settings → Actions → General → Workflow permissions).
+on:
+  repository_dispatch:
+    types: [api-deployed]
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run sync
+      - run: npm run validate
+      - name: Read the summary
+        id: summary
+        run: |
+          if [ -f .sync-summary.md ]; then
+            { echo 'body<<EOF'; cat .sync-summary.md; echo 'EOF'; } >> "$GITHUB_OUTPUT"
+            cat .sync-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Open or update the pull request
+        if: steps.summary.outputs.body != ''
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: sync/openapi
+          add-paths: openapi.json
+          commit-message: Update the OpenAPI specification
+          title: Update the OpenAPI specification
+          body: ${{ steps.summary.outputs.body }}
+          delete-branch: true
