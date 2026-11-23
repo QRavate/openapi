@@ -182,6 +182,7 @@
                       "folder_id": null,
                       "rules": [],
                       "rules_clock": "paris",
+                      "app": null,
                       "utm": null,
                       "served_destination": "https://exemple.fr/offre",
                       "gs1": null,
@@ -211,7 +212,7 @@
           "QR codes"
         ],
         "summary": "Créer un QR code",
-        "description": "Crée un QR code dynamique qui redirige vers `destination`, ou qui affiche une page hébergée (`page`). Émet `qr.created`.",
+        "description": "Crée un QR code dynamique qui redirige vers `destination`, qui envoie chaque téléphone vers sa boutique d’applications (`app`), ou qui affiche une page hébergée (`page`). Émet `qr.created`.",
         "requestBody": {
           "required": true,
           "content": {
@@ -228,35 +229,33 @@
                     "utm": true
                   }
                 },
+                "app": {
+                  "summary": "Application mobile",
+                  "value": {
+                    "name": "Télécharger l’appli",
+                    "destination": "https://exemple.fr/app",
+                    "app": {
+                      "ios": "https://apps.apple.com/fr/app/mon-appli/id123456789",
+                      "android": "https://play.google.com/store/apps/details?id=fr.exemple.appli"
+                    }
+                  }
+                },
                 "regles": {
                   "summary": "Avec des règles",
                   "value": {
-                    "name": "Application",
-                    "destination": "https://exemple.fr/app",
+                    "name": "Menu multilingue",
+                    "destination": "https://exemple.fr/menu",
                     "rules": [
                       {
-                        "name": "iPhone",
+                        "name": "Anglais",
                         "when": {
-                          "os": [
-                            "ios"
+                          "lang": [
+                            "en"
                           ]
                         },
                         "to": [
                           {
-                            "url": "https://apps.apple.com/app/id000"
-                          }
-                        ]
-                      },
-                      {
-                        "name": "Android",
-                        "when": {
-                          "os": [
-                            "android"
-                          ]
-                        },
-                        "to": [
-                          {
-                            "url": "https://play.google.com/store/apps/details?id=fr.exemple"
+                            "url": "https://exemple.fr/en/menu"
                           }
                         ]
                       }
@@ -349,6 +348,7 @@
                     "folder_id": null,
                     "rules": [],
                     "rules_clock": "paris",
+                    "app": null,
                     "utm": null,
                     "served_destination": "https://exemple.fr/offre",
                     "gs1": null,
@@ -425,6 +425,7 @@
                     "folder_id": null,
                     "rules": [],
                     "rules_clock": "paris",
+                    "app": null,
                     "utm": null,
                     "served_destination": "https://exemple.fr/offre",
                     "gs1": null,
@@ -540,6 +541,7 @@
                     "folder_id": null,
                     "rules": [],
                     "rules_clock": "paris",
+                    "app": null,
                     "utm": null,
                     "served_destination": "https://exemple.fr/nouvelle-offre",
                     "gs1": null,
@@ -1528,6 +1530,7 @@
                   "folder_id": null,
                   "rules": [],
                   "rules_clock": "paris",
+                  "app": null,
                   "utm": null,
                   "served_destination": "https://exemple.fr/offre",
                   "gs1": null,
@@ -1608,6 +1611,7 @@
                   "folder_id": null,
                   "rules": [],
                   "rules_clock": "paris",
+                  "app": null,
                   "utm": null,
                   "served_destination": "https://exemple.fr/offre",
                   "gs1": null,
@@ -1688,6 +1692,7 @@
                   "folder_id": null,
                   "rules": [],
                   "rules_clock": "paris",
+                  "app": null,
                   "utm": null,
                   "served_destination": "https://exemple.fr/offre",
                   "gs1": null,
@@ -1780,6 +1785,7 @@
                     "folder_id": null,
                     "rules": [],
                     "rules_clock": "paris",
+                    "app": null,
                     "utm": null,
                     "served_destination": "https://exemple.fr/offre",
                     "gs1": null,
@@ -1958,6 +1964,17 @@
             ],
             "description": "Heure des conditions de jour, d’heure et de date."
           },
+          "app": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AppLinks"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "QR « Application » : liens App Store et Google Play, ou `null`. `destination` sert alors les autres appareils."
+          },
           "utm": {
             "oneOf": [
               {
@@ -2009,6 +2026,7 @@
           "folder_id": null,
           "rules": [],
           "rules_clock": "paris",
+          "app": null,
           "utm": null,
           "served_destination": "https://exemple.fr/offre",
           "gs1": null,
@@ -2077,6 +2095,9 @@
             ],
             "default": "paris"
           },
+          "app": {
+            "$ref": "#/components/schemas/AppLinks"
+          },
           "gs1": {
             "$ref": "#/components/schemas/Gs1"
           }
@@ -2139,6 +2160,17 @@
               }
             ]
           },
+          "app": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AppLinks"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Remplace les liens App Store et Google Play ; `null` les retire."
+          },
           "gs1": {
             "oneOf": [
               {
@@ -2152,12 +2184,32 @@
           }
         }
       },
+      "AppLinks": {
+        "type": "object",
+        "description": "QR « Application », inclus dans tous les plans : au scan, iOS ouvre `ios`, Android ouvre `android`, les autres appareils (ordinateur, iPad récent) suivent `destination`. À la création, sans `destination`, la fiche App Store (sinon Google Play) sert de destination. Un lien au moins ; seules les fiches des deux boutiques sont acceptées. Les règles de redirection passent avant.",
+        "properties": {
+          "ios": {
+            "type": "string",
+            "format": "uri",
+            "description": "Fiche App Store (`https://apps.apple.com/…`)."
+          },
+          "android": {
+            "type": "string",
+            "format": "uri",
+            "description": "Fiche Google Play (`https://play.google.com/store/apps/details?id=…`)."
+          }
+        },
+        "example": {
+          "ios": "https://apps.apple.com/fr/app/mon-appli/id123456789",
+          "android": "https://play.google.com/store/apps/details?id=fr.exemple.appli"
+        }
+      },
       "Gs1": {
         "type": "object",
         "required": [
           "gtin"
         ],
-        "description": "Produit GS1 Digital Link (plans Pro et Max). Le QR suit la norme : redirection 307, `?linkType=` pour un type de lien, `?linkType=all` pour l’ensemble des liens (application/linkset+json), langue selon le téléphone.",
+        "description": "Produit GS1 Digital Link (plans Pro et Max). Le QR suit la norme : redirection 307, `?linkType=` pour un type de lien, `?linkType=linkset` pour l’ensemble des liens (application/linkset+json), langue selon le téléphone.",
         "properties": {
           "gtin": {
             "type": "string",
